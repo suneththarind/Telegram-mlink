@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from dotenv import load_dotenv
 
 load_dotenv()  # Load environment variables
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+BOT_TOKEN = os.getenv("7987139723:AAGbf6Vve5CNJXZsgugTMk9NDzLLB2f6b74")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
