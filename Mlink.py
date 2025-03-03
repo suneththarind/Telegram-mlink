@@ -1,68 +1,89 @@
 import os
-from urllib.parse import urlparse, parse_qs
-from base64 import b32encode
+import time
+import libtorrent as lt
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from dotenv import load_dotenv
 
-load_dotenv()  # Load environment variables
-BOT_TOKEN = os.getenv("7987139723:AAGbf6Vve5CNJXZsgugTMk9NDzLLB2f6b74")
+# Telegram Bot Token
+TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+# Download directory
+DOWNLOAD_DIR = "./downloads/"
+
+# Initialize downloads directory
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🔍 Send me a Magnet Link to analyze!\n"
-        "Example: magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10..."
-    )
+    await update.message.reply_text("Send me a magnet link to download the torrent")
 
 async def handle_magnet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    magnet_link = update.message.text
+    msg = await update.message.reply_text("Starting download...")
+    
     try:
-        magnet_uri = update.message.text.strip()
+        # Create torrent session
+        ses = lt.session()
+        ses.listen_on(6881, 6891)
         
-        if not magnet_uri.startswith("magnet:?"):
-            await update.message.reply_text("❌ Invalid format! Must start with 'magnet:?'")
-            return
-
-        parsed = urlparse(magnet_uri)
-        params = parse_qs(parsed.query)
-
-        # Extract parameters with defaults
-        xt = params.get('xt', [''])[0]
-        dn = params.get('dn', ['No name provided'])[0]
-        tr = params.get('tr', [])
+        # Add magnet link
+        params = {
+            'save_path': DOWNLOAD_DIR,
+            'storage_mode': lt.storage_mode_t.storage_mode_sparse,
+            'paused': False,
+            'auto_managed': True,
+            'duplicate_is_error': True
+        }
         
-        # Process info hash
-        info_hash = "N/A"
-        if xt.startswith("urn:btih:"):
-            raw_hash = xt[9:]
-            if len(raw_hash) == 32:  # Base32 encoded
-                info_hash = b32encode(raw_hash.upper().encode()).hex().lower()
-            else:  # HEX format
-                info_hash = raw_hash.lower()
-
-        # Build response
-        response = (
-            "🧲 **Magnet Link Analysis**\n"
-            f"• **Name**: `{dn}`\n"
-            f"• **Info Hash**: `{info_hash}`\n"
-            f"• **Trackers Found**: {len(tr)}\n"
+        handle = lt.add_magnet_uri(ses, magnet_link, params)
+        
+        # Wait for metadata
+        await context.bot.edit_message_text(
+            "Downloading metadata...",
+            chat_id=msg.chat_id,
+            message_id=msg.message_id
         )
         
-        if tr:
-            response += "\n**Top Trackers**:\n"
-            for idx, tracker in enumerate(tr[:3], 1):
-                response += f"  {idx}. `{tracker}`\n"
+        while not handle.has_metadata():
+            time.sleep(1)
         
-        await update.message.reply_text(response, parse_mode="Markdown")
-
+        # Get torrent info
+        torinfo = handle.get_torrent_info()
+        file_name = torinfo.name()
+        
+        # Wait for download to complete
+        await context.bot.edit_message_text(
+            f"Downloading: {file_name}",
+            chat_id=msg.chat_id,
+            message_id=msg.message_id
+        )
+        
+        while handle.status().state != lt.torrent_status.seeding:
+            s = handle.status()
+            progress = s.progress * 100
+            await context.bot.edit_message_text(
+                f"Progress: {progress:.2f}% - {s.download_rate / 1000} kB/s",
+                chat_id=msg.chat_id,
+                message_id=msg.message_id
+            )
+            time.sleep(5)
+        
+        # Get first file path (for multi-file torrents, you might want to zip them)
+        file_path = os.path.join(DOWNLOAD_DIR, file_name)
+        
+        # Send file back to user
+        await context.bot.send_document(
+            chat_id=update.effective_chat.id,
+            document=open(file_path, 'rb'),
+            filename=file_name,
+            caption="Here's your downloaded file!"
+        )
+        
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Error: {str(e)}")
+        await update.message.reply_text(f"Error: {str(e)}")
 
 if __name__ == "__main__":
-    if not BOT_TOKEN:
-        raise ValueError("Missing TELEGRAM_BOT_TOKEN in environment!")
+    application = Application.builder().token(TOKEN).build()
     
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_magnet))
-    print("Bot is running...")
-    app.run_polling()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_magnet))
+    
+    application.run_polling()
