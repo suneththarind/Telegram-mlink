@@ -1,101 +1,71 @@
 import os
-import logging
-from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
-from youtubesearchpython import VideosSearch
+import tempfile
+import aiohttp
+from aiohttp import web
 from pytube import YouTube
 
-# Set up logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Initialize your Pella bot
+BOT_TOKEN = os.environ.get("7929307746:AAHu9MUWhE8NgRy2JVyAU-9GK2UXz6b8kEc")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
-# Telegram Bot Token
-TOKEN = '7929307746:AAFALj0ptgbheb0KIzJLZ3gbbwmv558qQbk'
+async def handle_download(request):
+    data = await request.json()
+    message = data.get("message", {})
+    chat_id = message.get("chat", {}).get("id")
+    url = message.get("text")
 
-def start(update: Update, context: CallbackContext):
-    """Send a message when the command /start is issued."""
-    update.message.reply_text(
-        'Hi! Send me a song name and I will try to download it for you!\n\n'
-        '⚠️ Please ensure you have the rights to download any content you request.'
-    )
-
-def help_command(update: Update, context: CallbackContext):
-    """Send a message when the command /help is issued."""
-    update.message.reply_text(
-        'Just send me the name of the song you want to download. '
-        'I will search YouTube and send you the best match!'
-    )
-
-def search_song(update: Update, context: CallbackContext):
-    """Search for a song and download the audio."""
-    query = update.message.text
-    if not query:
-        update.message.reply_text("Please send a song name.")
-        return
+    if not url or ("youtube.com" not in url and "youtu.be" not in url):
+        return await send_message(chat_id, "Please send a valid YouTube URL.")
 
     try:
-        # Search YouTube for the query
-        videos_search = VideosSearch(query, limit=1)
-        results = videos_search.result()
-        
-        if not results['result']:
-            update.message.reply_text("No results found 😢")
-            return
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            yt = YouTube(url)
+            stream = yt.streams.filter(progressive=True, file_extension="mp4").order_by("resolution").desc().first()
+            
+            if not stream:
+                return await send_message(chat_id, "No suitable video stream found.")
 
-        video_url = results['result'][0]['link']
-        video_title = results['result'][0]['title']
+            file_path = stream.download(output_path=tmp_dir)
+            file_size = os.path.getsize(file_path) / (1024 * 1024)  # MB
+            
+            if file_size > 50:
+                return await send_message(chat_id, "File too large (max 50MB allowed).")
 
-        # Download audio using pytube
-        yt = YouTube(video_url)
-        audio_stream = yt.streams.filter(only_audio=True, file_extension='mp4').first()
-        
-        if not audio_stream:
-            update.message.reply_text("Couldn't find an audio stream.")
-            return
+            async with aiohttp.ClientSession() as session:
+                with open(file_path, "rb") as video_file:
+                    form_data = aiohttp.FormData()
+                    form_data.add_field("video", video_file, filename=os.path.basename(file_path))
+                    await session.post(
+                        f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo",
+                        data={
+                            "chat_id": chat_id,
+                            "caption": "Here's your YouTube video!",
+                            "video": form_data["video"]
+                        }
+                    )
 
-        # Download the file
-        update.message.reply_text(f"Downloading: {video_title}...")
-        audio_file = audio_stream.download(output_path='downloads/')
-        
-        # Rename file
-        base, ext = os.path.splitext(audio_file)
-        new_file = base + '.mp3'
-        os.rename(audio_file, new_file)
-        
-        # Send the audio file
-        with open(new_file, 'rb') as audio:
-            update.message.reply_audio(audio, caption=video_title)
-        
-        # Clean up files
-        os.remove(new_file)
+        return web.Response(text="OK")
 
     except Exception as e:
-        logger.error(f"Error: {e}")
-        update.message.reply_text("Something went wrong. Please try again later.")
+        return await send_message(chat_id, f"Error: {str(e)}")
 
-def main():
-    """Start the bot."""
-    # Create the Updater and pass it your bot's token
-    updater = Updater(TOKEN, use_context=True)
+async def send_message(chat_id, text):
+    async with aiohttp.ClientSession() as session:
+        await session.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": text}
+        )
+    return web.Response(text="OK")
 
-    # Get the dispatcher to register handlers
-    dp = updater.dispatcher
+async def handle_updates(request):
+    if request.method == "POST":
+        return await handle_download(request)
+    return web.Response(text="OK")
 
-    # Register commands
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("help", help_command))
+def create_app():
+    app = web.Application()
+    app.router.add_post("/", handle_updates)
+    return app
 
-    # Register message handler
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, search_song))
-
-    # Create downloads directory if not exists
-    if not os.path.exists('downloads'):
-        os.makedirs('downloads')
-
-    # Start the Bot
-    updater.start_polling()
-    updater.idle()
-
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    web.run_app(create_app(), port=int(os.environ.get("PORT", 3000)))
