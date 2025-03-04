@@ -1,0 +1,8 @@
+{
+    "runtime": "python",
+    "entrypoint": "main.py",
+    "webhook": true,
+    "environment": {
+        "BOT_TOKEN": "7929307746:AAHu9MUWhE8NgRy2JVyAU-9GK2UXz6b8kEc"
+    }
+}
